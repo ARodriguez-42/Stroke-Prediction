@@ -1,0 +1,469 @@
+---
+title: "Stroke Prediction"
+author: "Antonio Rodriguez"
+date: "2023-11-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Loading Libraries
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(class)
+library(yardstick)
+library(glmnet)
+library(xgboost)
+```
+
+
+## Introduction 
+
+According to the World Health Organization (WHO) stroke is the 2nd leading cause of death globally, responsible for approximately 11% of total deaths.
+
+This data set is used to predict whether a patient is likely to get stroke based on the input parameters like gender, age, various diseases, and smoking status. Each row in the data provides relevant information about the patient.
+
+### Features   
+* gender
+* age, in years
+* hypertension: indicator of whether someone has hypertension
+* heart_disease: indicator of whether someone has heart disease
+* ever_married: indicator of whether someone has ever been married
+* work_type: type of employment classified into government, private sector, self employed, never worked, or they are a child with no work history
+* residence_type: geographic location classified as rural or urban
+* avg_glucose_level: average glucose level in mg/dL
+* bmi (body mass index)
+* smoking_status: smoking habits classified as never smoked, currently smokes, formerly smoked, or unknown
+* stroke: indicator of whether someone has had a stroke or not
+
+## Loading Dataset
+
+```{r}
+stroke_df <- read.csv('healthcare-dataset-stroke-data.csv')
+summary(stroke_df)
+```
+
+```{r}
+str(stroke_df)
+```
+### Cleaning Data
+
+BMI in the summary above is listed a type "chr". I will be changing it into a numeric value to help the prediction model and for EDA purposes. 
+To deal with the NA values in the BMI column, I will assign the mean BMI to each. 
+
+```{r, warning=FALSE}
+stroke_df$bmi <- as.numeric(stroke_df$bmi)
+stroke_df$bmi[is.na(stroke_df$bmi)] <- mean(stroke_df$bmi,na.rm=TRUE)
+```
+
+
+
+## EDA
+
+
+### Gender
+
+```{r}
+ggplot(data = stroke_df, aes(x = "", fill = gender)) +
+  geom_bar(width = 1) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  labs(title = "Gender Distribution")
+```
+
+```{r}
+gender_counts <- table(stroke_df$gender)
+print(gender_counts)
+```
+
+In the gender column, there were three different values: Male, Female and Other. Females account for most of the data with 2994. Male had a count of 2115. Other only had one occurrence. In a prediction model, there is no reason for this data to be include if it only has one occurrence. There are two ways to deal with it, either assign the person the gender with the highest frequency or just simply delete the row from the dataset. In this scenerio I will simply just delete the row. 
+
+```{r}
+stroke_df <- stroke_df %>%
+  filter(gender != "Other")
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+plot_data <- stroke_df %>%
+  group_by(gender, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = gender, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Gender") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+
+In this dataset, it is observed that women experience a higher frequency of strokes. However, the proportion of stroke cases relative to the total number of records is greater among males.
+
+
+### Age 
+
+```{r}
+ggplot(data = stroke_df, aes(x = age)) +
+  geom_histogram(breaks = seq(0, 88, by = 4), fill = "darkred", color = "black", alpha = 0.7) +
+  geom_density(aes(y = after_stat(count)), color = "blue") +
+  labs(title = "Histogram of Age", x = "Age", y = "Frequency")
+```
+
+```{r}
+stroke_df$stroke <- as.factor(stroke_df$stroke)
+
+ggplot(stroke_df, aes(x=stroke, y=age, fill = stroke)) +
+  geom_violin(trim=FALSE, fill="grey", color="darkgreen")+
+  geom_boxplot(width=0.1) + 
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) + 
+  theme_minimal() + 
+  labs(title = "Distribution of Stroke Classification by Age")
+```
+
+The age distribution in the histogram exhibits a slight left skew, indicating a predominantly balanced distribution. In the violin and box plots, we observe that the majority of stroke victims are aged above 30. However, it's noteworthy that there are two outliers below the age of 30. Additionally, the highest concentration of stroke cases is seen among individuals aged 75 and above.
+
+### Hypertension
+
+```{r, message=FALSE}
+stroke_df$hypertension <- as.factor(stroke_df$hypertension)
+
+plot_data <- stroke_df %>%
+  group_by(hypertension, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = hypertension, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Hypertension Classification") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(stroke_df, aes(x=hypertension, y=age, fill = hypertension)) +
+  geom_violin(trim=FALSE, fill="grey", color="darkgreen")+
+  geom_boxplot(width=0.1) + theme_minimal()+ 
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) + 
+  labs(title = "Distribution of Hypertension Classification by Age")
+```
+
+Examining the bar graph, we can see that among all the stroke victims, 73% of them do not have hypertension. Analyzing the violin and box plots, it becomes evident that among those who have hypertension, the majority of them are aged older than 23.
+
+
+### Heart Disease
+
+```{r, message=FALSE}
+stroke_df$heart_disease <- as.factor(stroke_df$heart_disease)
+
+plot_data <- stroke_df %>%
+  group_by(heart_disease, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = heart_disease, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Heart Disease Classification") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(stroke_df, aes(x=heart_disease, y=age, fill = heart_disease)) +
+  geom_violin(trim=FALSE, fill="grey", color="darkgreen")+
+  geom_boxplot(width=0.1) + 
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) + 
+  theme_minimal()+ 
+  labs(title = "Distribution of Heart Disease Classification by Age")
+```
+
+Examining the bar graph, we can see that among all the stroke victims, 81% of them do not have heart disease. Analyzing the violin and box plots, it becomes evident that among those who have heart disease, the majority of them are aged older than 38.
+
+
+### Ever Married
+
+
+```{r, message=FALSE, warning=FALSE}
+stroke_df$ever_married <- as.factor(stroke_df$ever_married)
+
+plot_data <- stroke_df %>%
+  group_by(ever_married, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = ever_married, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Marriage Classification") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+According to the bar chart, 88% of stroke victims in the dataset have a marital status of either 'married' or 'previously married.
+
+
+### Work Type
+
+
+```{r, message=FALSE}
+stroke_df$work_type <- as.factor(stroke_df$work_type)
+
+plot_data <- stroke_df %>%
+  group_by(work_type, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = work_type, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Work Type Classification") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+Based on the bar chart depicting work types, it is evident that individuals in the private sector constitute the majority of stroke victims in the dataset.
+
+
+### Residence Type
+
+
+```{r, message=FALSE}
+stroke_df$Residence_type <- as.factor(stroke_df$Residence_type)
+
+plot_data <- stroke_df %>%
+  group_by(Residence_type, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = Residence_type, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Residence Type") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+The distribution of stroke victims across residence types appears relatively even, with a slightly higher number of cases in urban areas
+
+
+### Average Glucose Level
+
+
+```{r}
+ggplot(stroke_df, aes(x=stroke, y=avg_glucose_level, fill = stroke)) +
+  geom_violin(trim=FALSE, fill="grey", color="darkgreen")+
+  geom_boxplot(width=0.1) + 
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) + 
+  theme_minimal()+ 
+  labs(title = "Distribution of Stroke Classification by Glucose Level")
+```
+
+When examining the violin and plots, we observe that the medians of both groups are relatively close, indicating a similar central tendency. However, the interquartile range (IQR) for the stroke victims is noticeably wider, and the third quartile (Q3) is skewed toward higher values.
+
+
+
+### Body Mass Index
+
+
+
+```{r}
+ggplot(stroke_df, aes(x=stroke, y=bmi, fill = stroke)) +
+  geom_violin(trim=FALSE, fill="grey", color="darkgreen")+
+  geom_boxplot(width=0.1) + 
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) + 
+  theme_minimal()+ 
+  labs(title = "Distribution of Stroke Classification by BMI")
+```
+Upon examining the violin and box plots, it is apparent that the medians of both groups are nearly identical, indicating a similar central tendency. The interquartile range (IQR) for the stroke victims is more compact. Notably, the distribution of BMI for stroke victims is concentrated within the 25-32 range.
+
+### Smoking Status
+
+
+```{r, message=FALSE}
+stroke_df$smoking_status <- as.factor(stroke_df$smoking_status)
+
+plot_data <- stroke_df %>%
+  group_by(smoking_status, stroke) %>%
+  summarise(count = n()) %>%
+  mutate(stroke = as.factor(stroke)) 
+
+ggplot(plot_data, aes(x = smoking_status, y = count, fill = stroke, label = count)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = 0.9), vjust = -0.5) +
+  labs(title = "Distribution of Stroke by Smoking Classification") +
+  scale_fill_manual(values = c("0" = "red", "1" = "orange")) +
+  theme_minimal()
+```
+
+Analyzing the bar graphs for the four smoking classifications, it's evident that the largest proportion of stroke victims falls into the 'never smoked' category.
+
+
+## Modeling 
+
+### Logistic Regression 
+
+```{r}
+model1 <- glm(stroke ~ . - id, family = binomial, data = stroke_df)
+summary(model1)
+```
+
+In the analysis of the GLM model summary, it is evident that the variables age, hypertension, and average glucose level exhibit statistical significance in predicting the occurrence of a stroke, with p-values below the 0.05 threshold. Armed with this insight, I will proceed to construct a refined model that exclusively incorporates these significant features.
+
+
+
+```{r}
+model2 <- glm(stroke ~ age + hypertension + avg_glucose_level, family = binomial, data = stroke_df)
+summary(model2)
+```
+
+In our model, we find that as age increases by 1 unit, the likelihood of experiencing a stroke increases by 0.070579. Similarly, a 1-unit increase in hypertension is associated with a 0.384447 increase in the likelihood of having a stroke. Lastly, a 1-unit rise in average glucose level is linked to a 0.004354 increase in the likelihood of suffering a stroke.      
+
+
+
+### Logistical Regression model
+
+
+
+```{r}
+set.seed(123)
+
+split <- createDataPartition(stroke_df$stroke, p = 0.8, list = FALSE)
+data_stroke_train <- stroke_df[split,]
+data_stroke_test <- stroke_df[-split,]
+
+
+predictors <- stroke_df[, c("age", "hypertension", "avg_glucose_level")]
+response <- stroke_df$stroke
+
+ctrl <- trainControl(method = "cv", number = 10)
+
+model <- train(
+  stroke ~ age + hypertension + avg_glucose_level, data = data_stroke_train, method = "glm",
+  trControl = ctrl, family = binomial
+)
+
+predictions <- predict(model, newdata = data_stroke_test, type = "raw")
+
+conf_matrix <- confusionMatrix(predictions, data_stroke_test$stroke)
+print(conf_matrix)
+
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+logReg_f1 <- 2 * (precision * recall) / (precision + recall)
+
+cat("F1-Score:", logReg_f1, "\n")
+```
+
+
+### k-NN
+
+
+```{r}
+knn_df <- stroke_df[, c("age", "hypertension", "avg_glucose_level", "stroke")]
+knn_split <- createDataPartition(knn_df$stroke, p = 0.8, list = FALSE)
+knn_train <- knn_df[split,]
+knn_test <- knn_df[-split,]
+
+k_values <- c(1, 3, 5, 7, 9)
+f1_scores <- numeric(length(k_values))
+best_conf_matrix <- NULL
+knn_f1 <- 0
+
+for (i in 1:length(k_values)) {
+  k <- k_values[i]
+  classifier_knn <- knn(train = knn_train,
+                        test = knn_test,
+                        cl = knn_train$stroke,
+                        k = k)
+  
+  conf_matrix <- confusionMatrix(data = classifier_knn, reference = knn_test$stroke)
+  precision <- conf_matrix$byClass["Pos Pred Value"]
+  recall <- conf_matrix$byClass["Sensitivity"]
+  f1_scores[i] <- 2 * (precision * recall) / (precision + recall)
+  
+  if (f1_scores[i] > knn_f1){
+    best_conf_matrix <- conf_matrix
+    knn_f1 <- f1_scores[i]
+  }
+  
+}
+
+best_k <- k_values[which.max(f1_scores)]
+cat("Best k:", best_k, " with F1-Score of ", knn_f1, "\n")
+best_conf_matrix
+
+```
+
+### XGBoost
+
+```{r, warning=FALSE}
+XGB_df <- knn_df
+XGB_df$age <- as.numeric(XGB_df$age)
+XGB_df$hypertension <- as.numeric(XGB_df$hypertension) 
+XGB_df$avg_glucose_level <- as.numeric(XGB_df$avg_glucose_level)
+XGB_df$stroke <- as.numeric(XGB_df$stroke) 
+
+XGB_split <- createDataPartition(XGB_df$stroke, p = 0.8, list = FALSE)
+XGB_train <- XGB_df[split,]
+XGB_test <- XGB_df[-split,]
+
+X <- XGB_train[, c("age", "hypertension", "avg_glucose_level")]
+Y <- XGB_train$stroke
+
+dtrain <- xgb.DMatrix(data = as.matrix(X), label = as.numeric(Y) - 1)  
+
+params <- list(
+  booster = "gbtree",
+  objective = "binary:logistic",  
+  eval_metric = "logloss",  
+  eta = 0.3,  
+  max_depth = 6,  
+  subsample = 0.8,  
+  colsample_bytree = 0.8,  
+  nrounds = 100  
+)
+
+xgb_model <- xgb.train(params = params, data = dtrain, nrounds = params$nrounds)
+
+X_test <- as.matrix(XGB_test[, c("age", "hypertension", "avg_glucose_level")])
+dtest <- xgb.DMatrix(data = X_test)
+predictions <- predict(xgb_model, dtest)
+
+predicted_labels <- ifelse(predictions > 0.5, 1, 0)
+
+ref <- as.numeric(XGB_test$stroke) - 1
+ref <- factor(ref, levels = c(0, 1))
+predicted_labels <- factor(predicted_labels, levels = c(0, 1))
+
+conf_matrix <- confusionMatrix(data = predicted_labels, reference = ref)
+print(conf_matrix)   
+
+precision <- conf_matrix$byClass["Pos Pred Value"]
+recall <- conf_matrix$byClass["Sensitivity"]
+xgb_F1 <- 2 * (precision * recall) / (precision + recall)
+
+cat("F1-Score:", xgb_F1, "\n")
+```
+
+## Conclusion 
+
+```{r}
+scores <- data.frame(
+  Models = c("Generalized Linear Model", "k-NN", "XGBoost"),
+  "F1 Scores" = c(logReg_f1, knn_f1, xgb_F1)
+)
+print(scores)
+```
+
+Upon comparing the performance of the three models with a controlled set of features, the k-Nearest Neighbors model achieved the highest F1 score with 0.9763938 and exhibited an accuracy of 95.4%.
+
+
+
